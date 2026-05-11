@@ -2,6 +2,7 @@ import os
 import uuid
 import asyncio
 import google.auth
+import json # make outputs into pretty JSON objects instead of escaped strings
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -18,8 +19,12 @@ from google.genai import client, types
 os.environ["GOOGLE_API_USE_CLIENT_CERTIFICATE"] = "false"
 load_dotenv(override=True)
 project_id = os.environ.get("GOOGLE_CLOUD_PROJECT_ID")
-os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "1"
-os.environ["GOOGLE_CLOUD_LOCATION"] = "us-east1"
+use_vertex_ai = os.environ.get("GOOGLE_GENAI_USE_VERTEXAI")
+google_cloud_location = os.environ.get("GOOGLE_CLOUD_LOCATION")
+
+# Some hidden logic going on - force the SDK to use your variables!
+if project_id:
+    os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
 
 # =====================================================================
 # 2. SCHEMAS & TOOLS
@@ -28,6 +33,7 @@ class UserQuery(BaseModel):
     query: str
     session_id: str = None 
 
+# we are creating structure for output
 class SafetyAssessment(BaseModel):
     internal_thinking: str = Field(description="Explain how data relates to CRAWL/WALK/RUN.")
     risk_level: str = Field(description="Low, Medium, or High")
@@ -53,7 +59,7 @@ credentials, _ = google.auth.default(
 )
 
 vertex_client = client.Client(
-    vertexai=True, project=project_id, location="us-central1", credentials=credentials 
+    vertexai=True, project=project_id, location=google_cloud_location, credentials=credentials 
 )
 
 gemini_model = google_llm.Gemini(model="gemini-2.5-flash")
@@ -126,6 +132,13 @@ async def analyze_safety(req: UserQuery):
                         final_assessment = part.function_call.args
                     elif part.text and not final_assessment:
                         final_assessment = part.text
+
+        # If final_assessment is a string (JSON), parse it back into a dict
+        if isinstance(final_assessment, str):
+            try:
+                final_assessment = json.loads(final_assessment)
+            except:
+                pass # Keep as string if it's not valid JSON
 
         return {
             "session_id": s_id,
