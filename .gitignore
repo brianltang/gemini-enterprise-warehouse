@@ -1,0 +1,4 @@
+# --- Security & Environment ---
+.env
+.env.local
+.env.*
