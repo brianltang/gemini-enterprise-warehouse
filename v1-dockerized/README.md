@@ -29,7 +29,7 @@ To resolve `ModuleNotFoundError: No module named 'google.adk'`, you must explici
 ```bash
 uv add google-adk
 ```
-*(If you are installing via a local wheel file in the corporate environment, use: `uv pip install /path/to/google_adk.whl`)*
+*(If you are installing via a local wheel file in the corporate environment, use: `uv pip install google-adk --index-url https://pypi.org/simple`)*
 
 ---
 
