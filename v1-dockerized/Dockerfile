@@ -1,34 +1,22 @@
-# Use the official, highly optimized uv image for building
-FROM ghcr.io/astral-sh/uv:python3.11-alpine AS builder
-
-# Set the working directory
-WORKDIR /app
-
-# Enable bytecode compilation
-ENV UV_COMPILE_BYTECODE=1
-
-# Copy only the files needed to install dependencies (leveraging Docker caching)
-COPY pyproject.toml uv.lock ./
-
-# Install dependencies into a virtual environment
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-dev
-
-# --- RUNTIME STAGE ---
-# Use a lightweight, clean python image for the final runtime
-FROM python:3.11-alpine
+# 1. Use the FULL python image (not slim) to get build tools for free
+FROM python:3.11
 
 WORKDIR /app
 
-# Copy the virtual environment and application code from the builder stage
-COPY --from=builder /app/.venv /app/.venv
+# 2. Copy the requirements file (with google-adk REMOVED)
+COPY requirements.txt .
+
+# 3. Install the standard locked dependencies
+RUN pip install --no-cache-dir -r requirements.txt --index-url https://pypi.org/simple
+
+# 4. Install google-adk separately (this avoids the hash error)
+RUN pip install --no-cache-dir google-adk --index-url https://pypi.org/simple
+
+# 5. Copy the rest of your app
 COPY . .
 
-# Ensure the app uses the virtual environment's python/packages
-ENV PATH="/app/.venv/bin:$PATH"
-ENV PORT=8000
+# 6. Ensure the port is set for Cloud Run
+ENV PORT=8080
+EXPOSE 8080
 
-EXPOSE 8000
-
-# Run the app directly using uvicorn inside the virtual environment
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}"]
