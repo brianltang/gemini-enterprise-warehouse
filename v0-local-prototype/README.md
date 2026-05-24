@@ -115,7 +115,7 @@ uv add fastapi uvicorn pydantic python-dotenv google-genai google-adk
 Because `uv` is a single binary, you don't need to manually activate virtual environments:
 
 ```bash
-uv run python main.py
+uv run python v0_prototype_basic.py
 ```
 
 ---
@@ -156,6 +156,38 @@ This project leverages the Google Agent Development Kit (ADK) using the followin
 | **Tools** | Functions (like `check_robot_sensors`) provided to the agent, forcing it to fetch real-time data before reasoning. |
 
 ---
+## 5. 🚀 Running and Testing the Prototype
+
+Follow these steps to spin up the local development server and test the endpoint with a sample query.
+
+**1. Start the API Server**
+Using your configured environment, run the FastAPI application using ```uv```. This will ensure all dependencies and virtual environment constraints are automatically loaded.
+```bash
+uv run python v0_prototype_basic.py
+```
+Note: Keep this terminal window open. If you have recently changed your Google Cloud credentials (ADC), you may need to restart this server (Ctrl + C and run again) to apply the changes.
+
+**2. Test the Endpoint**
+Open a separate terminal window and use ```curl``` to send a test payload to the local endpoint.
+
+```bash
+curl -X POST "http://localhost:8000/analyze-safety" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "query": "I am looking at robot BOT-99. It is currently in the north warehouse.", 
+       "session_id": "brian-tang-demo-001"
+     }'
+```
+A successful request will return a JSON payload evaluating the safety or state of the queried robot:
+
+"Parameter","Type","Description"
+"query","String","The safety observation or robot status query."
+"session_id","String","A unique identifier for tracking multi-turn conversation state."
+
+### 🔍Troubleshooting
+Permission Denied (```403``` or ```401```): Ensure your active Application Default Credentials (ADC) match your test project identity. If you switch GCP accounts, remember to restart your ```uv run``` server to load the updated credentials.
+
+___
 
 ## 🐙 5. Git & GitHub Enterprise Setup
 
