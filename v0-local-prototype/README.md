@@ -8,7 +8,39 @@ An AI-powered Safety Agent built with FastAPI, Vertex AI (Gemini 2.5 Flash), and
 
 ## 🏗️ 1. The Cloudtop Golden Workflow (Bootup)
 
-Developing GenAI applications on Google Cloudtop requires managing multiple layers of identity. Before running any code, you **must** configure your gcloud CLI to point to the correct project and authenticate correctly. If you ever run into authentication or Airlock issues, run through this bootup sequence:
+Developing GenAI applications on Google Cloudtop requires managing multiple layers of identity. Before running any code, you **must** configure your gcloud CLI to point to the correct project and authenticate correctly. 
+
+### Step 0: VS Code SSH ForwardAgent Setup (One-Time)
+To use VS Code smoothly and ensure your corporate identity (LOAS cert) travels with you from your laptop to your Cloudtop, you must configure SSH Agent Forwarding.
+
+**1. Open a terminal on your local laptop and SSH into your Cloudtop:**
+```bash
+ssh bltdevice.c.googlers.com
+```
+
+**2. Once inside the Cloudtop, authenticate your gnubby:**
+```bash
+gcert
+```
+
+**3. Type *code* to ensure the VS Code server is initialized.**
+
+**4. Back on your local laptop, create an SSH config file:**
+```bash
+mkdir -p ~/.ssh
+nano ~/.ssh/config
+```
+
+**5. Paste the following configuration (replace bltdevice and brianltang with your details):**
+```bash
+Host bltdevice
+  HostName bltdevice.c.googlers.com
+  User brianltang
+  ForwardAgent yes
+```
+**6.Every time after this: Open VS Code locally, click the green >< icon in the bottom left corner, select Connect to Host, and choose bltdevice.**
+
+If you ever run into authentication or Airlock issues, run through this bootup sequence:
 
 ### Step 1: Physical & SSH Authentication
 
