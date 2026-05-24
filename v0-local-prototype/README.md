@@ -8,21 +8,40 @@ An AI-powered Safety Agent built with FastAPI, Vertex AI (Gemini 2.5 Flash), and
 
 ## 🏗️ 1. The Cloudtop Golden Workflow (Bootup)
 
-Developing GenAI applications on Google Cloudtop requires managing multiple layers of identity. If you ever run into authentication or Airlock issues, run through this bootup sequence:
+Developing GenAI applications on Google Cloudtop requires managing multiple layers of identity. Before running any code, you **must** configure your gcloud CLI to point to the correct project and authenticate correctly. If you ever run into authentication or Airlock issues, run through this bootup sequence:
+
+### Step 1: Physical & SSH Authentication
 
 | Step | Location | Command | Purpose |
 | :--- | :--- | :--- | :--- |
 | **1** | Local Laptop | `gcert` | Authenticate your physical SKMS/gnubby security key. |
 | **2** | Local Laptop | `code .` | Open VS Code. This inherits the live LOAS cert into the session. |
 | **3** | Cloudtop VS Code | `gcert` | Ensure the remote machine sees your forwarded agent. |
-| **4** | Cloudtop VS Code | `gcloud auth login ... --update-adc` | Set Cloud identity (ADC) for Vertex AI (see exact command below). |
-| **5** | Cloudtop VS Code | `glogin` | Refresh OAuth2 tokens for internal tools like `gpkg` (Fixes 401 Airlock errors). |
+| **4** | Cloudtop VS Code | `glogin` | Refresh OAuth2 tokens for internal tools like `gpkg` (Fixes 401 Airlock errors). |
 
-**The Identity Split (ADC) Command:**
+### Step 2: Google Cloud Identity (The "Identity Split")
+
+Because you are developing on an internal Cloudtop but interacting with a customer-facing demo project (e.g., an Altostrat tenant), you must explicitly configure `gcloud` to use the demo account.
+
+**1. Set the correct target project:**
+
+```bash
+gcloud config set project blt-test-project-1
+```
+
+**2. Switch to your Demo Identity:**
+
+```bash
+gcloud config set account admin@brianltang.altostrat.com
+```
+
+**3. Generate Application Default Credentials (ADC):**
+
+This is the most critical step. It generates a local `credentials.json` file on your Cloudtop so your Python code can seamlessly talk to Vertex AI acting as the Admin, *without* overriding your underlying LOAS network access.
+
 ```bash
 gcloud auth login admin@brianltang.altostrat.com --update-adc --no-launch-browser
 ```
-*(Note: This overrides your personal Cloud identity so the Python code talks to Gemini as the Altostrat Admin, but doesn’t touch your LOAS identity so you can still use internal tools as `brianltang`).*
 
 ---
 
@@ -31,6 +50,7 @@ gcloud auth login admin@brianltang.altostrat.com --update-adc --no-launch-browse
 This project uses **`uv`** as a high-performance replacement for `pip` and `venv`. It is written in Rust, 10x-100x faster, and handles its own Python versions.
 
 ### Installing `uv` (Bypass Skippy)
+
 ```bash
 curl -LsSf -o install_uv.sh https://astral.sh/uv/install.sh
 chmod +x install_uv.sh
@@ -41,21 +61,27 @@ rm install_uv.sh
 ```
 
 ### Initializing the Project
+
 1. Clone the repository and navigate into the folder.
 2. Create the `.env` file based on your project configuration:
+
 ```env
 GOOGLE_CLOUD_PROJECT_ID="blt-test-project-1"
 GOOGLE_CLOUD_LOCATION="us-central1"
 GOOGLE_GENAI_USE_VERTEXAI="true"
 ```
+
 3. Initialize and install dependencies (Auto-Syncs `pyproject.toml`):
+
 ```bash
 uv init
 uv add fastapi uvicorn pydantic python-dotenv google-genai google-adk
 ```
 
 ### Running the Application
+
 Because `uv` is a single binary, you don't need to manually activate virtual environments:
+
 ```bash
 uv run python main.py
 ```
@@ -65,14 +91,19 @@ uv run python main.py
 ## 🔐 3. Security & IAM Context
 
 ### BeyondCorp mTLS Override
+
 In the Python code, you will see this line:
+
 ```python
 os.environ["GOOGLE_API_USE_CLIENT_CERTIFICATE"] = "false"
 ```
+
 **Why?** When the `google-genai` library tries to talk to Vertex AI from a Cloudtop, it detects the corporate network and tries to upgrade the connection to mTLS. However, because client-side SSL certs are often restricted, the system crashes. Setting this to `false` forces the library to act like a normal laptop and use standard TLS.
 
 ### IAM Setup
+
 Ensure your Altostrat identity has the **Service Usage Consumer** role to consume quota/billing using ADC:
+
 ```bash
 gcloud projects add-iam-policy-binding blt-test-project-1 \
   --member="user:admin@brianltang.altostrat.com" \
@@ -99,24 +130,30 @@ This project leverages the Google Agent Development Kit (ADK) using the followin
 To push this code to the Cloud GTM GitHub, ensure your Cloudtop is configured correctly.
 
 ### 1. Basic Git Hygiene
+
 ```bash
 git config --global user.email "brianltang@google.com"
 git config --global user.name "Brian Tang"
 git config --global init.defaultBranch main
 git config --global protocol.sso.allow always
-git config --global pull.rebase true
+git config --global protocol.sso.rebase true
 ```
 
 ### 2. GitHub CLI (OAuth Setup)
+
 Instead of manual SSH keys, use the `gh` CLI for secure SAML SSO provisioning:
+
 ```bash
 sudo apt update && sudo apt install gh
 gh auth login --hostname github.com -p https -w
 ```
+
 *(Follow the interactive prompts to authorize via browser).*
 
 ### 3. Pushing the Repo
+
 Ensure your `.gitignore` includes `.env`, `.venv`, and `__pycache__`, then:
+
 ```bash
 git init
 git branch -M main
@@ -129,6 +166,7 @@ git push -u origin main
 ---
 
 ## 🤖 6. AI Coding Assistants (Internal Rules)
+
 According to internal security guidelines (`go/using-genai-internally`), third-party AI tools (Copilot, ChatGPT, Claude) are strictly forbidden on corporate equipment.
 
 *   **Use Jetski**: The AI-native fork of VS Code for internal developers.
