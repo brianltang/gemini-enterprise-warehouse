@@ -9,8 +9,8 @@ COPY requirements.txt .
 # 3. Install the standard locked dependencies
 RUN pip install --no-cache-dir -r requirements.txt --index-url https://pypi.org/simple
 
-# 4. Install google-adk separately (this avoids the hash error)
-RUN pip install --no-cache-dir google-adk --index-url https://pypi.org/simple
+# 4. Install google-adk and the A2A HTTP server components
+RUN pip install --no-cache-dir "google-adk[a2a]" "a2a-sdk[http-server]" --index-url https://pypi.org/simple
 
 # 5. Copy the rest of your app
 COPY . .
