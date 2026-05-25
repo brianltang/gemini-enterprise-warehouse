@@ -273,7 +273,7 @@ gcloud run services add-iam-policy-binding warehouse-safety-expert \
   "capabilities": {},
   "skills": [
     {
-      "id": "analyze-safety",
+      "id": "collision_safety_expert",
       "name": "Analyze Robot Safety",
       "description": "Evaluates if a robot is safe to operate based on current sensor status.",
       "tags": ["safety", "robotics", "sensors"],
