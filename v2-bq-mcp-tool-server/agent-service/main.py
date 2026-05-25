@@ -16,6 +16,8 @@ from google.genai import client
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+import inspect # if you add any tool, this helps inject correct params into wrapper function on the fly
+
 os.environ["GOOGLE_API_USE_CLIENT_CERTIFICATE"] = "false"
 load_dotenv(override=True)
 project_id = os.environ.get("GOOGLE_CLOUD_PROJECT_ID")
@@ -56,24 +58,46 @@ async def discover_mcp_tools():
             print(f">>> Discovered {len(mcp_tools.tools)} tools from Stdio MCP server.")
             
             adk_tools = []
+
             for tool in mcp_tools.tools:
                 print(f"    - Registering tool: {tool.name}")
+                t_name = tool.name
+                t_desc = tool.description
+                # Get the schema (what fields are required) from MCP
+                t_schema = tool.inputSchema 
                 
-                def make_mcp_call_wrapper(t_name=tool.name):
-                    async def mcp_tool_callable(*args, **kwargs):
-                        # On invocation, spawn the subprocess again to execute the call
-                        async with stdio_client(server_params) as (r, w):
-                            async with ClientSession(r, w) as s:
-                                await s.initialize()
-                                response = await s.call_tool(t_name, arguments=kwargs)
-                                return response.content
-                    
-                    mcp_tool_callable.__name__ = t_name
-                    mcp_tool_callable.__doc__ = tool.description
-                    return mcp_tool_callable
+                # 1. Create a generic wrapper that passes all args to MCP
+                async def mcp_tool_wrapper(**kwargs):
+                    async with stdio_client(server_params) as (r, w):
+                        async with ClientSession(r, w) as s:
+                            await s.initialize()
+                            response = await s.call_tool(t_name, arguments=kwargs)
+                            # Format the response content into a clean string for Gemini
+                            return "\n".join([c.text for c in response.content if hasattr(c, 'text')])
+
+                # 2. DYNAMICALLY BUILD THE SIGNATURE (The "Anti-Impostor" Move)
+                # This tells the ADK exactly what parameters to send to Gemini
+                params = []
+                properties = t_schema.get("properties", {})
+                required = t_schema.get("required", [])
+
+                for param_name, param_info in properties.items():
+                    params.append(
+                        inspect.Parameter(
+                            name=param_name,
+                            kind=inspect.Parameter.KEYWORD_ONLY,
+                            annotation=str, # You can map types more deeply, but str is safe for now
+                            default=inspect.Parameter.empty if param_name in required else None
+                        )
+                    )
+
+                # Inject the signature and metadata into our wrapper
+                mcp_tool_wrapper.__signature__ = inspect.Signature(params)
+                mcp_tool_wrapper.__name__ = t_name
+                mcp_tool_wrapper.__doc__ = t_desc
                 
-                adk_tools.append(make_mcp_call_wrapper())
-                
+                adk_tools.append(mcp_tool_wrapper)
+
             return adk_tools
 
 # =====================================================================
@@ -111,8 +135,10 @@ expert = Agent(
     output_schema=SafetyAssessment,
     instruction="""
     You are an Operational Bot Collision Expert. 
-    ALWAYS check sensor data using your tools before providing an assessment.
-    Use CRAWL/WALK/RUN logic.
+    ALWAYS analyze the full history of the provided telemetry to find patterns.
+    Look for environmental trends (recurring issues in specific zones) 
+    and hardware anomalies (unsteady battery drain).
+    Use CRAWL/WALK/RUN logic for the final risk level.
     """
 )
 
