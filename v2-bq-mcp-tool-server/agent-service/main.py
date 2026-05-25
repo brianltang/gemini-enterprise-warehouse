@@ -75,7 +75,7 @@ async def discover_mcp_tools():
                             # Format the response content into a clean string for Gemini
                             return "\n".join([c.text for c in response.content if hasattr(c, 'text')])
 
-                # 2. DYNAMICALLY BUILD THE SIGNATURE (The "Anti-Impostor" Move)
+                # 2. DYNAMICALLY BUILD THE SIGNATURE 
                 # This tells the ADK exactly what parameters to send to Gemini
                 params = []
                 properties = t_schema.get("properties", {})
@@ -139,6 +139,12 @@ expert = Agent(
     Look for environmental trends (recurring issues in specific zones) 
     and hardware anomalies (unsteady battery drain).
     Use CRAWL/WALK/RUN logic for the final risk level.
+
+    CRITICAL FORMATTING RULE: 
+    When outputting your SafetyAssessment fields, ensure the text in 'internal_thinking' 
+    and 'recommended_action' is formatted using clean Markdown. Use bolding (**), 
+    bullet points (-), or Markdown tables (|---|) where appropriate. 
+    Gemini Enterprise will render this Markdown directly to the end-user.
     """
 )
 
