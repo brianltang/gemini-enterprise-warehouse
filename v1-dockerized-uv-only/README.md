@@ -158,30 +158,26 @@ uv export --format requirements-txt > requirements.txt
 **`Dockerfile`**
 ```dockerfile
 # 1. Use the full python image (not slim) to get build tools out of the box
-FROM python:3.11
+FROM python:3.13-bookworm
 
-# Create non-root user group and user for security posture
+# Install uv binary directly
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+# Security: Non-root user
 RUN groupadd -r appgroup && useradd -r -g appgroup -m appuser
-
 WORKDIR /app
-COPY requirements.txt .
 
-# 3. Install standard requirements
-RUN pip install --no-cache-dir -r requirements.txt --index-url https://pypi.org/simple
-
-# 4. Install A2A dependencies
-RUN pip install --no-cache-dir "google-adk[a2a]" "a2a-sdk[http-server]" --index-url https://pypi.org/simple
+# Install deps directly from the pyproject.toml created by 'uv init'
+COPY pyproject.toml .
+RUN uv pip install --system . --index-url https://pypi.org/simple
+RUN uv pip install --system "google-adk[a2a]" "a2a-sdk[http-server]" --index-url https://pypi.org/simple
 
 COPY . .
-
-# Set permissions for non-root user
 RUN chown -R appuser:appgroup /app
 USER appuser
 
-# 6. Expose the standard Cloud Run port
 ENV PORT=8080
 EXPOSE 8080
-
 CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}"]
 ```
 
