@@ -64,4 +64,4 @@ The architecture documented here serves as the foundation for true Enterprise AI
 *   **RAG:** Grounding the agent in official Warehouse Safety compliance documents via Vertex AI Search. 
 
 ---
-*Built ruthlessly for production. No black boxes. No low-code limits.*
+*Built with a vision for production. No black boxes. No low-code limits.*
