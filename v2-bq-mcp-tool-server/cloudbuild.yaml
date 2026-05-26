@@ -1,0 +1,10 @@
+steps:
+  # Build the first version of your new MCP Expert agent
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'us-central1-docker.pkg.dev/$PROJECT_ID/adk-demos/warehouse-mcp-expert:v1', '.']
+    env:
+      - 'DOCKER_BUILDKIT=1'
+
+# Push to the existing adk-demos repository
+images:
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/adk-demos/warehouse-mcp-expert:v1'

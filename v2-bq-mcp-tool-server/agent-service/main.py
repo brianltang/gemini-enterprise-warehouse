@@ -1,4 +1,4 @@
-# ~/Projects/adk-basic/v2-bq-mcp-tool-server/agent-service/main.py
+# ~/Projects/adk-basic/v3-dockerized/agent-service/main.py
 import os
 import sys
 import asyncio
@@ -6,7 +6,6 @@ import google.auth
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
-
 from google.adk import Agent
 from google.adk.models import google_llm
 from google.adk.a2a.utils.agent_to_a2a import to_a2a 
@@ -15,16 +14,20 @@ from google.genai import client
 # Import stdio client components
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-
-import inspect # if you add any tool, this helps inject correct params into wrapper function on the fly
+from contextlib import asynccontextmanager
+import inspect 
 
 os.environ["GOOGLE_API_USE_CLIENT_CERTIFICATE"] = "false"
 load_dotenv(override=True)
+
 project_id = os.environ.get("GOOGLE_CLOUD_PROJECT_ID")
-google_cloud_location = os.environ.get("GOOGLE_CLOUD_LOCATION")
+google_cloud_location = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
 
 # Path to the remote tool server script
-TOOL_SERVER_PATH = os.path.expanduser("~/Projects/adk-basic/v2-bq-mcp-tool-server/bq-mcp-server/main.py")
+TOOL_SERVER_PATH = os.environ.get(
+    "TOOL_SERVER_PATH", 
+    os.path.expanduser("~/Projects/adk-basic/v2-bq-mcp-tool-server/bq-mcp-server/main.py")
+)
 
 # =====================================================================
 # 1. DISCOVER AND BIND STDIO TOOLS
@@ -34,14 +37,11 @@ async def discover_mcp_tools():
     Spawns the BigQuery MCP server as a subprocess over stdio,
     discovers its tools, and dynamically wraps them.
     """
-    # Define parameters using the current python, but set the correct CWD
-    # and map stderr to the terminal so we can see why it crashes!
     server_params = StdioServerParameters(
         command=sys.executable, # Uses the active virtualenv python
         args=[TOOL_SERVER_PATH],
         env=os.environ.copy() # Passes GCP/ADC environment variables
     )
-
     print(f"DEBUG: Spawning Tool Server at {TOOL_SERVER_PATH}")
     
     # Establish the local stdio connection channel
@@ -53,19 +53,17 @@ async def discover_mcp_tools():
                 print("\nCRITICAL: Handshake failed. The Tool Server script likely crashed on boot.")
                 print("Run 'uv run python ../bq-mcp-server/main.py' manually to see the error.\n")
                 raise e
-                
+            
             mcp_tools = await session.list_tools()
             print(f">>> Discovered {len(mcp_tools.tools)} tools from Stdio MCP server.")
-            
             adk_tools = []
-
+            
             for tool in mcp_tools.tools:
                 print(f"    - Registering tool: {tool.name}")
                 t_name = tool.name
                 t_desc = tool.description
-                # Get the schema (what fields are required) from MCP
                 t_schema = tool.inputSchema 
-                
+
                 # 1. Create a generic wrapper that passes all args to MCP
                 async def mcp_tool_wrapper(**kwargs):
                     async with stdio_client(server_params) as (r, w):
@@ -76,17 +74,16 @@ async def discover_mcp_tools():
                             return "\n".join([c.text for c in response.content if hasattr(c, 'text')])
 
                 # 2. DYNAMICALLY BUILD THE SIGNATURE 
-                # This tells the ADK exactly what parameters to send to Gemini
                 params = []
                 properties = t_schema.get("properties", {})
                 required = t_schema.get("required", [])
-
+                
                 for param_name, param_info in properties.items():
                     params.append(
                         inspect.Parameter(
                             name=param_name,
                             kind=inspect.Parameter.KEYWORD_ONLY,
-                            annotation=str, # You can map types more deeply, but str is safe for now
+                            annotation=str, 
                             default=inspect.Parameter.empty if param_name in required else None
                         )
                     )
@@ -95,9 +92,8 @@ async def discover_mcp_tools():
                 mcp_tool_wrapper.__signature__ = inspect.Signature(params)
                 mcp_tool_wrapper.__name__ = t_name
                 mcp_tool_wrapper.__doc__ = t_desc
-                
                 adk_tools.append(mcp_tool_wrapper)
-
+                
             return adk_tools
 
 # =====================================================================
@@ -107,20 +103,13 @@ credentials, _ = google.auth.default(
     scopes=["https://www.googleapis.com/auth/cloud-platform"], 
     quota_project_id=project_id
 )
+
 vertex_client = client.Client(
     vertexai=True, project=project_id, location=google_cloud_location, credentials=credentials
 )
+
 gemini_model = google_llm.Gemini(model="gemini-2.5-flash")
 gemini_model.api_client = vertex_client
-
-# Discover the tools synchronously on startup
-try:
-    loop = asyncio.get_event_loop()
-except RuntimeError:
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-discovered_tools = loop.run_until_complete(discover_mcp_tools())
 
 class SafetyAssessment(BaseModel):
     internal_thinking: str = Field(description="Explain how data relates to CRAWL/WALK/RUN.")
@@ -129,9 +118,10 @@ class SafetyAssessment(BaseModel):
     shutdown_required: bool
 
 expert = Agent(
-    name="collision_safety_expert", 
+    name="mcp_warehouse_expert", 
+    description="Advanced warehouse safety agent. Uses MCP to dynamically query BigQuery telemetry and evaluate robot hardware/environmental risks.",
     model=gemini_model,  
-    tools=discovered_tools, # Bound directly!
+    tools=[], # We start with an empty list and inject dynamically on startup
     output_schema=SafetyAssessment,
     instruction="""
     You are an Operational Bot Collision Expert. 
@@ -139,7 +129,6 @@ expert = Agent(
     Look for environmental trends (recurring issues in specific zones) 
     and hardware anomalies (unsteady battery drain).
     Use CRAWL/WALK/RUN logic for the final risk level.
-
     CRITICAL FORMATTING RULE: 
     When outputting your SafetyAssessment fields, ensure the text in 'internal_thinking' 
     and 'recommended_action' is formatted using clean Markdown. Use bolding (**), 
@@ -148,5 +137,27 @@ expert = Agent(
     """
 )
 
+# =====================================================================
+# 3. LIFESPAN MANAGEMENT & SERVER GENERATION
+# =====================================================================
+
+# 1. Define a clean, single lifespan manager 
+@asynccontextmanager
+async def combined_lifespan(app: FastAPI):
+    # This runs ONCE when the server boots
+    print("Initializing ADK Agent and discovering MCP tools...")
+    expert.tools = await discover_mcp_tools()
+    print(f"Successfully bound {len(expert.tools)} tools.")
+    yield
+    # This runs ONCE when the server shuts down
+    print("Shutting down agent service...")
+
+# 2. Define port first so it is in scope before calling to_a2a
 port = int(os.environ.get("PORT", 8080))
-app = to_a2a(expert, port=port)
+
+# 3. Pass your lifespan context manager directly into the to_a2a function
+app = to_a2a(
+    expert, 
+    port=port, 
+    lifespan=combined_lifespan
+)
