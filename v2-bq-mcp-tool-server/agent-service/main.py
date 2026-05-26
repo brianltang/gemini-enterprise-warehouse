@@ -37,12 +37,15 @@ async def discover_mcp_tools():
     Spawns the BigQuery MCP server as a subprocess over stdio,
     discovers its tools, and dynamically wraps them.
     """
+    # Use "python" as the fallback so that it leverages the active path (such as uv's env) inside Docker
+    python_cmd = os.environ.get("PYTHON_PATH", "python")
+
     server_params = StdioServerParameters(
-        command=sys.executable, # Uses the active virtualenv python
+        command=python_cmd, 
         args=[TOOL_SERVER_PATH],
-        env=os.environ.copy() # Passes GCP/ADC environment variables
+        env=os.environ.copy()
     )
-    print(f"DEBUG: Spawning Tool Server at {TOOL_SERVER_PATH}")
+    print(f"DEBUG: Spawning Tool Server with command '{python_cmd}' at {TOOL_SERVER_PATH}")
     
     # Establish the local stdio connection channel
     async with stdio_client(server_params) as (read_stream, write_stream):
@@ -51,7 +54,7 @@ async def discover_mcp_tools():
                 await session.initialize()
             except Exception as e:
                 print("\nCRITICAL: Handshake failed. The Tool Server script likely crashed on boot.")
-                print("Run 'uv run python ../bq-mcp-server/main.py' manually to see the error.\n")
+                print(f"Failed utilizing command: {python_cmd} {TOOL_SERVER_PATH}")
                 raise e
             
             mcp_tools = await session.list_tools()
@@ -144,20 +147,15 @@ expert = Agent(
 # 1. Define a clean, single lifespan manager 
 @asynccontextmanager
 async def combined_lifespan(app: FastAPI):
-    # This runs ONCE when the server boots
     print("Initializing ADK Agent and discovering MCP tools...")
     expert.tools = await discover_mcp_tools()
     print(f"Successfully bound {len(expert.tools)} tools.")
     yield
-    # This runs ONCE when the server shuts down
     print("Shutting down agent service...")
 
-# 2. Define port first so it is in scope before calling to_a2a
-port = int(os.environ.get("PORT", 8080))
-
-# 3. Pass your lifespan context manager directly into the to_a2a function
+# 2. DO NOT pass port/host here. This ensures to_a2a returns the app 
+# object immediately to the global 'app' variable for uvicorn to pick up.
 app = to_a2a(
     expert, 
-    port=port, 
     lifespan=combined_lifespan
 )
