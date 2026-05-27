@@ -5,7 +5,7 @@ import asyncio
 import google.auth
 from dotenv import load_dotenv
 from fastapi import FastAPI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model
 from google.adk import Agent
 from google.adk.models import google_llm
 from google.adk.a2a.utils.agent_to_a2a import to_a2a 
@@ -32,72 +32,56 @@ TOOL_SERVER_PATH = os.environ.get(
 # =====================================================================
 # 1. DISCOVER AND BIND STDIO TOOLS
 # =====================================================================
-async def discover_mcp_tools():
+# 1. Rename this function so it just builds wrappers using an ACTIVE session
+async def build_tool_wrappers(session: ClientSession):
     """
-    Spawns the BigQuery MCP server as a subprocess over stdio,
-    discovers its tools, and dynamically wraps them.
+    Takes an already-connected MCP session and builds the ADK tool wrappers.
     """
-    # Use "python" as the fallback so that it leverages the active path (such as uv's env) inside Docker
-    python_cmd = os.environ.get("PYTHON_PATH", "python")
-
-    server_params = StdioServerParameters(
-        command=python_cmd, 
-        args=[TOOL_SERVER_PATH],
-        env=os.environ.copy()
-    )
-    print(f"DEBUG: Spawning Tool Server with command '{python_cmd}' at {TOOL_SERVER_PATH}")
+    mcp_tools = await session.list_tools()
     
-    # Establish the local stdio connection channel
-    async with stdio_client(server_params) as (read_stream, write_stream):
-        async with ClientSession(read_stream, write_stream) as session:
-            try:
-                await session.initialize()
-            except Exception as e:
-                print("\nCRITICAL: Handshake failed. The Tool Server script likely crashed on boot.")
-                print(f"Failed utilizing command: {python_cmd} {TOOL_SERVER_PATH}")
-                raise e
-            
-            mcp_tools = await session.list_tools()
-            print(f">>> Discovered {len(mcp_tools.tools)} tools from Stdio MCP server.")
-            adk_tools = []
-            
-            for tool in mcp_tools.tools:
-                print(f"    - Registering tool: {tool.name}")
-                t_name = tool.name
-                t_desc = tool.description
-                t_schema = tool.inputSchema 
-
-                # 1. Create a generic wrapper that passes all args to MCP
-                async def mcp_tool_wrapper(**kwargs):
-                    async with stdio_client(server_params) as (r, w):
-                        async with ClientSession(r, w) as s:
-                            await s.initialize()
-                            response = await s.call_tool(t_name, arguments=kwargs)
-                            # Format the response content into a clean string for Gemini
-                            return "\n".join([c.text for c in response.content if hasattr(c, 'text')])
-
-                # 2. DYNAMICALLY BUILD THE SIGNATURE 
-                params = []
-                properties = t_schema.get("properties", {})
-                required = t_schema.get("required", [])
-                
-                for param_name, param_info in properties.items():
-                    params.append(
-                        inspect.Parameter(
-                            name=param_name,
-                            kind=inspect.Parameter.KEYWORD_ONLY,
-                            annotation=str, 
-                            default=inspect.Parameter.empty if param_name in required else None
-                        )
+    adk_tools = []
+    for tool in mcp_tools.tools:
+        t_name = tool.name
+        t_desc = tool.description
+        t_schema = tool.inputSchema
+        
+        # Build the strict Pydantic model
+        InputModel = create_model(
+            f"{t_name}_input",
+            __base__=BaseModel,
+            **{
+                prop_name: (
+                    str if prop_info.get("type") == "string" else
+                    int if prop_info.get("type") == "integer" else
+                    float if prop_info.get("type") == "number" else
+                    bool if prop_info.get("type") == "boolean" else dict,
+                    Field(
+                        default=... if prop_name in t_schema.get("required", []) else prop_info.get("default", None),
+                        description=prop_info.get("description", "")
                     )
+                )
+                for prop_name, prop_info in t_schema.get("properties", {}).items()
+            }
+        )
 
-                # Inject the signature and metadata into our wrapper
-                mcp_tool_wrapper.__signature__ = inspect.Signature(params)
-                mcp_tool_wrapper.__name__ = t_name
-                mcp_tool_wrapper.__doc__ = t_desc
-                adk_tools.append(mcp_tool_wrapper)
-                
-            return adk_tools
+        # THE FIX IS HERE: Create a factory function to correctly capture t_name
+        def create_wrapper(tool_name):
+            async def mcp_tool_wrapper(params: InputModel):
+                arguments = params.model_dump()
+                try: 
+                    response = await session.call_tool(tool_name, arguments=arguments)
+                    return "\n".join([c.text for c in response.content if hasattr(c, 'text')])
+                except Exception as e:
+                    print(f"CRITICAL: Tool call to '{tool_name}' failed, session might be dead: {e}")
+                    return "ERROR: The telemetry system is temporarily offline. Please retry in 10 seconds."
+            return mcp_tool_wrapper
+
+        wrapper = create_wrapper(t_name)
+        wrapper.__name__ = t_name
+        wrapper.__doc__ = t_desc
+        adk_tools.append(wrapper)
+        
+    return adk_tools
 
 # =====================================================================
 # 2. INITIALIZE ENGINE COMPONENTS
@@ -127,21 +111,34 @@ expert = Agent(
     tools=[], # We start with an empty list and inject dynamically on startup
     # output_schema=SafetyAssessment,
     instruction="""
-    You are an Operational Bot Collision Expert. 
+    You are a Warehouse Safety Investigator. Your goal is to find the ROOT CAUSE of issues.
+
+    1. START: Always run 'check_robot_sensors' first to see the current state.
+    2. ANALYZE: If current sensors are 'DEGRADED' or battery is < 20%, you MUST investigate further.
+    3. INVESTIGATE: Automatically call 'analyze_robot_metric_trend' for the suspicious metric. 
+    - Start with hours=24.
+    - If 24 hours returns no data, try hours=168 (1 week).
+    4. SYNTHESIZE: Once you have both the current state and the trend, provide your Safety Assessment.
+    5. DO NOT ask the user for permission to run follow-up tools; just execute them and provide the finished insight.
 
     CRITICAL RULES ON SAFETY ADVICE:
     - DO NOT provide general safety advice or generic emergency protocols.
-    - You are ONLY authorized to provide assessments based on REAL data retrieved via 'check_robot_sensors'.
-    - Even if a user reports an emergency (e.g., "Connection Lost", "Urgent"), your FIRST and ONLY action must be to execute the 'check_robot_sensors' tool to find the last known state.
+    - You are authorized to provide assessments based on data retrieved from your tools.
+    - Even if a user reports an emergency (e.g., "Connection Lost", "Urgent"), your FIRST action must be to execute the 'check_robot_sensors' tool to find the last known state.
     - Only analyze the robot specifically requested in the CURRENT user message.
-    - Each safety assessment must be an isolated snapshot based ONLY on the data returned in the current turn.
+
+    TOOL USAGE RULES - YOU MUST FOLLOW THESE:
+    1. For immediate safety assessments, current status, or a "health check", you MUST use the `check_robot_sensors` tool.
+    2. For requests about "trends", "anomalies", "history", "logs", or behavior "over time", you MUST use the `analyze_robot_metric_trend` tool.
+    3. CRITICAL: When using `analyze_robot_metric_trend`, you MUST provide both the `robot_id` and a specific `metric`.
+        * Valid metrics are: 'battery_level', 'lidar_status', 'bumper_status', 'vision_3d_status'.
+        * If the user asks about power or battery logs, use metric='battery_level'.
+        * If the user asks a general question about anomalies, FIRST use `check_robot_sensors` to get current status, then optionally use `analyze_robot_metric_trend` if you need more context.
 
     CRITICAL WORKFLOW FOR NEW ASSESSMENTS:
-    1. You MUST execute the 'check_robot_sensors' tool to retrieve BigQuery telemetry for the requested robot.
-    2. Analyze the sensors (LiDAR, Bumper, Vision).
-    3. Analyze battery discharge (look for 0% or sudden drops).
-    4. Analyze environmental trends (look for recurring blockages in specific zones across the history).
-    5. Use CRAWL/WALK/RUN logic for your internal analysis.
+    1. Execute the appropriate tool based on the TOOL USAGE RULES above.
+    2. Analyze the data returned.
+    3. Use CRAWL/WALK/RUN logic for your internal analysis.
 
     FORMATTING RULES:
     
@@ -175,17 +172,32 @@ expert = Agent(
 # 3. LIFESPAN MANAGEMENT & SERVER GENERATION
 # =====================================================================
 
-# 1. Define a clean, single lifespan manager 
 @asynccontextmanager
 async def combined_lifespan(app: FastAPI):
-    print("Initializing ADK Agent and discovering MCP tools...")
-    expert.tools = await discover_mcp_tools()
-    print(f"Successfully bound {len(expert.tools)} tools.")
-    yield
-    print("Shutting down agent service...")
+    python_cmd = os.environ.get("PYTHON_PATH", "python")
+    server_params = StdioServerParameters(
+        command=python_cmd, 
+        args=[TOOL_SERVER_PATH],
+        env=os.environ.copy(),
+        stderr=sys.stderr
+    )
+    
+    print("Starting persistent Tool Server subprocess...")
+    # 3. Keep the subprocess alive for the entire lifespan of the FastAPI app
+    async with stdio_client(server_params) as (read_stream, write_stream):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+            
+            print("Building ADK tool wrappers...")
+            expert.tools = await build_tool_wrappers(session)
+            print(f"Successfully bound {len(expert.tools)} tools.")
+            
+            # The FastAPI app runs while we stay paused here on 'yield'
+            # The subprocess remains active and waiting for requests
+            yield
+            
+    print("Shutting down agent service and killing Tool Server subprocess...")
 
-# 2. DO NOT pass port/host here. This ensures to_a2a returns the app 
-# object immediately to the global 'app' variable for uvicorn to pick up.
 app = to_a2a(
     expert, 
     lifespan=combined_lifespan,

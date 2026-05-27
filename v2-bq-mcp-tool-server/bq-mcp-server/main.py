@@ -58,6 +58,84 @@ async def check_robot_sensors(robot_id: str) -> str:
     except Exception as e:
         return f"Error querying BigQuery: {str(e)}"
 
+@server.tool()
+async def analyze_robot_metric_trend(robot_id: str, metric: str, hours: int = 24) -> str:
+    """
+    Analyzes the historical trend of a specific metric for a robot over a time period.
+    Use this for requests about 'history', 'trends', 'logs', or 'anomalies'.
+
+    Args:
+        robot_id: The unique ID of the robot.
+        metric: The metric to analyze (e.g., 'battery_level', 'lidar_status').
+        hours: The number of hours to look back for the trend analysis (default: 24).
+    """
+    # Validate metric to prevent SQL injection and ensure it's a valid column
+    valid_metrics = ['battery_level', 'lidar_status', 'bumper_status', 'vision_3d_status']
+    if metric not in valid_metrics:
+        return f"Invalid metric '{metric}'. Valid metrics are: {', '.join(valid_metrics)}"
+
+    # Determine if the metric is numeric or categorical for different analysis
+    is_numeric_metric = metric == 'battery_level'
+
+    if is_numeric_metric:
+        query = f"""
+            SELECT
+                AVG({metric}) as avg_value,
+                MIN({metric}) as min_value,
+                MAX({metric}) as max_value,
+                COUNT(*) as data_points
+            FROM `warehouse_ops.robot_telemetry`
+            WHERE robot_id = @robot_id AND timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)
+        """
+    else: # Categorical metric
+        query = f"""
+            SELECT
+                {metric} as status,
+                COUNT(*) as count
+            FROM `warehouse_ops.robot_telemetry`
+            WHERE robot_id = @robot_id AND timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)
+            GROUP BY {metric}
+            ORDER BY count DESC
+        """
+
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("robot_id", "STRING", robot_id),
+            bigquery.ScalarQueryParameter("hours", "INT64", hours),
+        ]
+    )
+
+    try:
+        loop = asyncio.get_running_loop()
+        query_job = await loop.run_in_executor(
+            None, lambda: bq_client.query(query, job_config=job_config)
+        )
+        results = await loop.run_in_executor(None, lambda: list(query_job.result()))
+
+        if not results:
+             return f"No telemetry data found for robot {robot_id} for metric '{metric}' in the last {hours} hours."
+        if is_numeric_metric and results[0].data_points == 0:
+             return f"No telemetry data found for robot {robot_id} for metric '{metric}' in the last {hours} hours."
+
+        report = f"Trend analysis for Robot '{robot_id}' metric '{metric}' over the last {hours} hours:\\n"
+        
+        if is_numeric_metric:
+            row = results[0]
+            report += (
+                f"  - Average: {row.avg_value:.2f}\\n"
+                f"  - Minimum: {row.min_value}\\n"
+                f"  - Maximum: {row.max_value}\\n"
+                f"  - Data Points: {row.data_points}"
+            )
+        else:
+            for row in results:
+                report += f"  - Status '{row.status}': {row.count} occurrences\\n"
+
+        return report.strip()
+
+    except Exception as e:
+        return f"Error querying BigQuery for trends: {str(e)}"
+        
 if __name__ == "__main__":
     # FastMCP manages its own stdio runner directly on start
     server.run()
