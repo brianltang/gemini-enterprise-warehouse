@@ -23,7 +23,11 @@ This project has evolved significantly to showcase a production-grade, resilient
 
 ## 🛠️ Phase 1: Environment & Dependencies
 
+This phase sets up two isolated Python environments using `uv`, a high-speed package manager.
+
 ### 1. Set up Tool Server packages (`bq-mcp-server`)
+
+This command initializes an environment for our "Tool Server," which will directly interact with BigQuery. We add `mcp` for the tool protocol, `google-cloud-bigquery` for database access, and `python-dotenv` for managing environment variables.
 
 ```bash
 cd ~/Projects/adk-basic/v2-bq-mcp-tool-server/bq-mcp-server
@@ -32,6 +36,8 @@ uv add mcp google-cloud-bigquery python-dotenv
 ```
 
 ### 2. Set up Agent packages (`agent-service`)
+
+This initializes the environment for our "Agent Service," the AI's brain. It includes `fastapi` and `uvicorn` for the web server, `pydantic` for data validation, and the Google ADK/A2A/MCP SDKs to communicate with Gemini and the Tool Server.
 
 ```bash
 cd ~/Projects/adk-basic/v3-dockerized/agent-service
@@ -44,9 +50,11 @@ uv pip install "google-adk[a2a]" "a2a-sdk[http-server]" mcp
 
 ## 🗄️ Phase 2: Database Provisioning (BigQuery)
 
-Populate BigQuery with an 8-hour telemetry dataset containing hidden anomalies for the agent to discover.
+This phase prepares the backend database with a rich, realistic dataset for the agent to analyze.
 
 ### 1. Authenticate and Create Schema
+
+These commands set up the necessary structure in BigQuery. First, we log into Google Cloud. Then, we use the `bq` command-line tool to create a `dataset` (like a database schema) called `warehouse_ops` and a `table` within it called `robot_telemetry` with specific columns and data types.
 
 ```bash
 # Authenticate with the correct workspace principal
@@ -61,6 +69,8 @@ robot_id:STRING,timestamp:TIMESTAMP,zone:STRING,lidar_status:STRING,bumper_statu
 ```
 
 ### 2. Inject 8-Hour Insight Dataset
+
+This powerful SQL query generates and inserts 2,400 realistic-looking telemetry records into our new table. It simulates 8 hours of data (`GENERATE_ARRAY(0, 479)`) for 5 different robots. Crucially, the `CASE` statements are used to intentionally "bake in" anomalies and specific failure patterns (like hardware disconnects, sensor blockages, and sudden battery drops) for the agent to later discover through its investigation.
 
 ```bash
 bq query --use_legacy_sql=false \
@@ -116,7 +126,10 @@ CROSS JOIN
 
 ### 1. The BigQuery MCP Tool Server (`bq-mcp-server/main.py`)
 
-This script runs the dynamic BigQuery query execution layer. It exposes Python functions as tools over a standard I/O (stdio) JSON-RPC channel.
+This script is the "hands" of our operation. It's a simple, fast server whose only job is to expose functions that query BigQuery. The `@server.tool()` decorator makes a Python function available to the Agent Service over the MCP protocol.
+
+*   `check_robot_sensors`: A real-time tool that fetches the absolute latest sensor reading for a single robot.
+*   `analyze_robot_metric_trend`: A historical analysis tool that aggregates data over a specified time (`hours`). It intelligently performs different calculations for numeric data (like `battery_level`) versus categorical data (like `lidar_status`).
 
 ```python
 # ~/Projects/adk-basic/v2-bq-mcp-tool-server/bq-mcp-server/main.py
@@ -138,7 +151,6 @@ server = FastMCP("bq-tool-server")
 async def check_robot_sensors(robot_id: str) -> str:
     """
     Fetches real-time sensor status for a robot from BigQuery. Use for safety assessments.
-
     Args:
         robot_id: The unique ID of the robot (e.g., BOT-99, JETSON-ORIN-01)
     """
@@ -177,7 +189,6 @@ async def analyze_robot_metric_trend(robot_id: str, metric: str, hours: int = 24
     """
     Analyzes the historical trend of a specific metric for a robot over a time period.
     Use this for requests about 'history', 'trends', 'logs', or 'anomalies'.
-
     Args:
         robot_id: The unique ID of the robot.
         metric: The metric to analyze (e.g., 'battery_level', 'lidar_status').
@@ -242,7 +253,11 @@ if __name__ == "__main__":
 
 ### 2. The Autonomous Agent Service (`agent-service/main.py`)
 
-This is the central coordinating A2A service. It reads the local MCP tool server, compiles typing contracts using Pydantic, establishes a persistent process-wide lifecycle session, and injects instructions enabling sequential multi-turn loops.
+This script is the "brain." It sets up a web server to host the Gemini-powered agent and orchestrates the connection to the Tool Server.
+
+*   `build_tool_wrappers`: This function is the "smart connector." It connects to the MCP server, gets a list of available tools, and for each one, uses `pydantic.create_model` to build a strict, type-safe function signature. This is the key to preventing AI confusion and ensuring the AI provides all required arguments. The `create_wrapper` factory inside is a Python best-practice to prevent variable scope issues inside loops.
+*   `expert = Agent(...)`: This defines the AI's core identity. The `instruction` prompt is crucial—it turns the agent into a "Warehouse Safety Investigator" and gives it a multi-step protocol for autonomously using its tools to find the root cause of problems.
+*   `combined_lifespan`: This FastAPI feature is used to manage background tasks. Here, it starts the `bq-mcp-server` as a persistent background process *once* when the web server boots up. This is a massive performance optimization, ensuring tool calls are lightning-fast.
 
 ```python
 # ~/Projects/adk-basic/v3-dockerized/agent-service/main.py
@@ -383,7 +398,7 @@ app = to_a2a(
 
 ## 🚀 Phase 4: Local Development
 
-Start the FastAPI server. The Agent will automatically spawn the MCP Tool Server as a subprocess and bind the tools to Gemini.
+These commands start the web server on your local machine. The `export` command sets your Google Cloud project, and the `uv run` command starts the `uvicorn` web server, pointing it to the `app` object in your `main.py` file.
 
 ```bash
 cd ~/Projects/adk-basic/v3-dockerized/agent-service
@@ -395,9 +410,15 @@ uv run uvicorn main:app --host 0.0.0.0 --port 8080
 
 ## 🐳 Phase 5: Containerization & Cloud Run Deployment
 
+This phase packages the entire application into a Docker container and deploys it to a scalable, serverless environment on Google Cloud.
+
 ### 1. Unified Dockerfile
 
-Create this `Dockerfile` in the root project directory (`v3-dockerized`). It packages both services into a single, high-performance container.
+The `Dockerfile` is a blueprint for building our container.
+*   `COPY`: It copies both the `agent-service` and `bq-mcp-server` directories into the container's filesystem.
+*   `RUN uv pip install`: It installs all necessary Python libraries into the container.
+*   `ENV`: It sets crucial environment variables. `TOOL_SERVER_PATH` tells the agent where to find the tool server *inside the container*, and `PYTHONPATH` ensures Python can find the `agent-service` module.
+*   `CMD`: This is the command that runs when the container starts, launching our Uvicorn web server.
 
 ```dockerfile
 # Use the official uv image with Python 3.13
@@ -436,6 +457,8 @@ CMD ["uvicorn", "agent-service.main:app", "--host", "0.0.0.0", "--port", "8080"]
 
 ### 2. Build and Submit with Cloud Build
 
+The `cloudbuild.yaml` file tells Google Cloud Build how to build the Docker image from our `Dockerfile`. The `gcloud builds submit` command initiates this process, which builds the container and pushes it to Google's Artifact Registry.
+
 ```yaml
 # cloudbuild.yaml
 steps:
@@ -457,6 +480,8 @@ gcloud builds submit --config=cloudbuild.yaml --project="blt-test-project-2"
 
 ### 3. Grant IAM Permissions
 
+These commands give the Cloud Run service the necessary permissions to operate. We grant its service account the ability to run jobs and read data in BigQuery (`bigquery.jobUser`, `bigquery.dataViewer`) and the ability to call the Gemini AI model (`aiplatform.user`).
+
 ```bash
 PROJECT_NUMBER=$(gcloud projects describe blt-test-project-2 --format='value(projectNumber)')
 SA_EMAIL="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
@@ -471,6 +496,8 @@ gcloud projects add-iam-policy-binding blt-test-project-2 --member="serviceAccou
 
 ### 4. Deploy to Cloud Run
 
+This command takes the container image we built and deploys it as a scalable microservice. `--allow-unauthenticated` makes it a public endpoint, and `--set-env-vars` passes necessary configuration to the running container.
+
 ```bash
 gcloud run deploy warehouse-mcp-expert-service \
   --image us-central1-docker.pkg.dev/blt-test-project-2/adk-demos/warehouse-mcp-expert:v1 \
@@ -482,6 +509,8 @@ gcloud run deploy warehouse-mcp-expert-service \
 ```
 
 ### 5. Grant Cloud Run Invoker Rights
+
+This final permission step allows other Google Cloud services (specifically, the Discovery Engine service account used by Gemini Enterprise extensions) to securely call our new Cloud Run endpoint.
 
 ```bash
 gcloud run services add-iam-policy-binding warehouse-mcp-expert-service \
@@ -495,10 +524,11 @@ gcloud run services add-iam-policy-binding warehouse-mcp-expert-service \
 
 ## 🧪 Phase 6: Verification & BigQuery Telemetry Tests
 
-Run these queries in the BigQuery console to prove the agent's assessments are data-driven and not hallucinations.
+These SQL queries are for you to run manually in the BigQuery console. Their purpose is to prove that the insights provided by the AI agent are factually correct and directly derivable from the raw data, ensuring the agent is not "hallucinating."
 
 ### 1. Prove LiDAR Stability (BOT-13)
-The agent claims **BOT-13's** LiDAR was 100% OPERATIONAL for 480 pings over 168 hours. Verify this:
+
+This query verifies the agent's claim that BOT-13's LiDAR was 100% operational over the past week. It should return only one row for the "OPERATIONAL" status with a count of 480.
 
 ```sql
 SELECT
@@ -515,7 +545,8 @@ GROUP BY
 *   **Expected Result:** A single row with status `OPERATIONAL` and a count of `480`.
 
 ### 2. Prove Power Log Degradation (BOT-13)
-The agent assesses a faulty battery due to wide fluctuations. Confirm this profile:
+
+This query confirms the agent's diagnosis of a faulty battery by calculating the min, max, and average battery levels. The key finding should be a `min_battery` of 0.0%, which validates the warning.
 
 ```sql
 SELECT
@@ -532,10 +563,11 @@ WHERE
 GROUP BY
   robot_id;
 ```
-*   **Expected Result:** `avg_battery` ≈ 42.96%, `min_battery` = 0.0%, `max_battery` = 100.0%. The `min` value dropping to 0.0% validates the agent's warning.
+*   **Expected Result:** `avg_battery` ≈ 42.96%, `min_battery` = 0.0%, `max_battery` = 100.0%.
 
 ### 3. Verify No Anomalies (BOT-42)
-Prove BOT-42 is healthy by checking for any non-operational statuses.
+
+This query proves that BOT-42 is operating perfectly by grouping all its sensor statuses. A healthy robot should only have one combination of statuses: all `OPERATIONAL`.
 
 ```sql
 SELECT
@@ -556,7 +588,7 @@ GROUP BY 1, 2, 3;
 
 ## 🤖 Phase 7: Gemini Enterprise Chat Scenarios
 
-Use these natural language queries in Gemini Enterprise to test the agent's autonomous reasoning.
+Use these natural language queries in Gemini Enterprise to test the agent's autonomous reasoning and diagnostic capabilities across different failure modes.
 
 | Scenario | Goal | NLQ Variations |
 | :--- | :--- | :--- |
