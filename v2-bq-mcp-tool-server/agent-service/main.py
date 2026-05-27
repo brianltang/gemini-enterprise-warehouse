@@ -17,6 +17,17 @@ from mcp.client.stdio import stdio_client
 from contextlib import asynccontextmanager
 import inspect 
 
+from google.adk.runners import Runner 
+from google.adk.plugins import ReflectAndRetryToolPlugin
+from google.adk.sessions import InMemorySessionService
+from google.adk.memory import InMemoryMemoryService
+
+from google.adk.a2a.executor.a2a_agent_executor import A2aAgentExecutor
+from google.adk.a2a.utils.agent_card_builder import AgentCardBuilder
+from a2a.server.apps import A2AFastAPIApplication
+from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.tasks import InMemoryTaskStore
+
 os.environ["GOOGLE_API_USE_CLIENT_CERTIFICATE"] = "false"
 load_dotenv(override=True)
 
@@ -116,8 +127,8 @@ expert = Agent(
     1. START: Always run 'check_robot_sensors' first to see the current state.
     2. ANALYZE: If current sensors are 'DEGRADED' or battery is < 20%, you MUST investigate further.
     3. INVESTIGATE: Automatically call 'analyze_robot_metric_trend' for the suspicious metric. 
-    - Start with hours=24.
-    - If 24 hours returns no data, try hours=168 (1 week).
+       - Start with hours=24.
+       - If 24 hours returns no data, try hours=168 (1 week).
     4. SYNTHESIZE: Once you have both the current state and the trend, provide your Safety Assessment.
     5. DO NOT ask the user for permission to run follow-up tools; just execute them and provide the finished insight.
 
@@ -125,20 +136,13 @@ expert = Agent(
     - DO NOT provide general safety advice or generic emergency protocols.
     - You are authorized to provide assessments based on data retrieved from your tools.
     - Even if a user reports an emergency (e.g., "Connection Lost", "Urgent"), your FIRST action must be to execute the 'check_robot_sensors' tool to find the last known state.
-    - Only analyze the robot specifically requested in the CURRENT user message.
+    - Only analyze the robot specifically requested by the user.
 
-    TOOL USAGE RULES - YOU MUST FOLLOW THESE:
+    TOOL USAGE & CONTEXT RULES - YOU MUST FOLLOW THESE:
     1. For immediate safety assessments, current status, or a "health check", you MUST use the `check_robot_sensors` tool.
     2. For requests about "trends", "anomalies", "history", "logs", or behavior "over time", you MUST use the `analyze_robot_metric_trend` tool.
-    3. CRITICAL: When using `analyze_robot_metric_trend`, you MUST provide both the `robot_id` and a specific `metric`.
-        * Valid metrics are: 'battery_level', 'lidar_status', 'bumper_status', 'vision_3d_status'.
-        * If the user asks about power or battery logs, use metric='battery_level'.
-        * If the user asks a general question about anomalies, FIRST use `check_robot_sensors` to get current status, then optionally use `analyze_robot_metric_trend` if you need more context.
-
-    CRITICAL WORKFLOW FOR NEW ASSESSMENTS:
-    1. Execute the appropriate tool based on the TOOL USAGE RULES above.
-    2. Analyze the data returned.
-    3. Use CRAWL/WALK/RUN logic for your internal analysis.
+    3. **CRITICAL: When calling ANY BigQuery tool, you MUST convert the robot_id parameter to UPPERCASE (e.g., if the user asks about "bot-13", you must send "BOT-13" to the tool).** The database is case-sensitive and will fail otherwise.
+    4. **CONTEXT AWARENESS:** Before calling a tool, review our conversation history. If I ask a follow-up question (e.g., "what is the lidar status?") about a robot we JUST analyzed, you should answer using the data already retrieved in the context history instead of unnecessarily executing the tool again.
 
     FORMATTING RULES:
     
@@ -198,7 +202,43 @@ async def combined_lifespan(app: FastAPI):
             
     print("Shutting down agent service and killing Tool Server subprocess...")
 
-app = to_a2a(
-    expert, 
-    lifespan=combined_lifespan,
+# 1. Initialize master FastAPI app with MCP lifespan
+app = FastAPI(lifespan=combined_lifespan)
+
+# 2. Build the explicit ADK Runner, injecting your Try-Harder plugin
+runner = Runner(
+    app_name="warehouse_safety_app",
+    agent=expert,
+    session_service=InMemorySessionService(),
+    memory_service=InMemoryMemoryService(),
+    plugins=[
+        ReflectAndRetryToolPlugin(
+            max_retries=3,
+            throw_exception_if_retry_exceeded=False
+        )
+    ],
 )
+
+# 3. Create the A2A Executor (the bridge between ADK and the A2A Protocol)
+executor = A2aAgentExecutor(runner=runner)
+
+# 4. Auto-generate the Agent Card (so other agents can still discover it)
+public_rpc_url = os.environ.get("AGENT_A2A_URL", "http://localhost:8080")
+agent_card = asyncio.run(
+    AgentCardBuilder(
+        agent=expert,
+        rpc_url=public_rpc_url
+    ).build()
+)
+
+# 5. Initialize the A2A App Protocol Handler
+a2a_server = A2AFastAPIApplication(
+    agent_card=agent_card,
+    http_handler=DefaultRequestHandler(
+        agent_executor=executor,
+        task_store=InMemoryTaskStore()
+    )
+)
+
+# 6. Mount the standardized A2A protocol routes onto your FastAPI app
+a2a_server.add_routes_to_app(app)

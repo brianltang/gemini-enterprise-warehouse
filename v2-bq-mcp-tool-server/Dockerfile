@@ -1,27 +1,19 @@
-# Use the official uv image with Python 3.13
-FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
-
-# Set the working directory to the ROOT of the app
+FROM python:3.13-slim
 WORKDIR /app
 
-# 1. Copy both project folders into the container
-COPY bq-mcp-server /app/bq-mcp-server
-COPY agent-service /app/agent-service
+# 1. Copy the internal, pre-downloaded Google packages directly from your laptop's .venv
+# into the global Python environment of the container. 
+# This bypasses Cloud Build's inability to authenticate to Corp Airlock!
+COPY agent-service/.venv/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
 
-# 2. Install dependencies for BOTH projects AND explicitly install google-adk
-RUN cd /app/bq-mcp-server && uv pip install --system --no-cache -r pyproject.toml
-RUN cd /app/agent-service && uv pip install --system --no-cache -r pyproject.toml
+# 2. Copy your code
+COPY agent-service/ /app/agent-service/
+COPY bq-mcp-server/ /app/bq-mcp-server/
 
-# EXPLICITLY install the SDK packages that weren't inside pyproject.toml
-RUN uv pip install --system --no-cache "google-adk[a2a]" "a2a-sdk[http-server]" mcp
-
-# 3. Set environment variables
-ENV TOOL_SERVER_PATH=/app/bq-mcp-server/main.py
-ENV GOOGLE_CLOUD_PROJECT_ID=blt-test-project-2
+# 3. Environment Variables
+ENV TOOL_SERVER_PATH="/app/bq-mcp-server/main.py"
 ENV PYTHONUNBUFFERED=1
 
-# 4. Expose the A2A port
-EXPOSE 8080
-
-# 5. Start the Agent Service from the ROOT WORKDIR
-CMD ["uvicorn", "agent-service.main:app", "--host", "0.0.0.0", "--port", "8080"]
+# 4. Start the server using `python -m uvicorn` instead of the uvicorn binary.
+# This completely bypasses all broken symlinks and hardcoded laptop paths!
+CMD exec python -m uvicorn agent-service.main:app --host 0.0.0.0 --port ${PORT:-8080}
