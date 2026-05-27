@@ -11,9 +11,7 @@ This repository uses `uv` for dependency management, the **Model Context Protoco
 This project has evolved significantly to showcase a production-grade, resilient, and intelligent agent architecture.
 
 1.  **V1 (Monolithic):** Tools were hardcoded inside the agent's main script. This was brittle and hard to maintain.
-
 2.  **V2 (Decoupled MCP):** We moved the BigQuery logic into a standalone "Tool Server" using the Model Context Protocol (MCP). The agent dynamically discovered tools over `stdio`, allowing for independent updates. However, this introduced new challenges with performance and AI reasoning.
-
 3.  **V3 (Optimized & Autonomous):** This version represents a production-ready architecture with critical improvements:
     *   **Persistent Connections:** We eliminated the massive performance bottleneck of spawning a new process for every tool call. The agent now maintains a single, persistent connection to the Tool Server for the entire application lifespan, resulting in near-instantaneous tool execution.
     *   **Ironclad Pydantic Schemas:** To solve "loosy-goosy" AI behavior, the agent now dynamically builds strict `Pydantic` models from the tool server's schemas. This forces the AI to adhere to correct data types (`int` vs. `str`) and required parameters, eliminating crashes and hallucinated tool calls.
@@ -122,277 +120,66 @@ CROSS JOIN
 
 ---
 
-## 💻 Phase 3: Core Codebase
+## 💻 Phase 3: Architectural Deep Dive & Code Breakdown
 
-### 1. The BigQuery MCP Tool Server (`bq-mcp-server/main.py`)
+Rather than deploying monolithic scripts, V3 uses a highly optimized, decoupled design patterns. Let’s break down the three most critical components of the codebase.
 
-This script is the "hands" of our operation. It's a simple, fast server whose only job is to expose functions that query BigQuery. The `@server.tool()` decorator makes a Python function available to the Agent Service over the MCP protocol.
-
-*   `check_robot_sensors`: A real-time tool that fetches the absolute latest sensor reading for a single robot.
-*   `analyze_robot_metric_trend`: A historical analysis tool that aggregates data over a specified time (`hours`). It intelligently performs different calculations for numeric data (like `battery_level`) versus categorical data (like `lidar_status`).
+### 1. Dynamic Pydantic Schema Compilation (The Interface)
+To bridge the gap between JSON-RPC (MCP) and Python type hints (ADK), we dynamically compile Pydantic schemas using the tool definitions discovered at startup.
 
 ```python
-# ~/Projects/adk-basic/v2-bq-mcp-tool-server/bq-mcp-server/main.py
-import os
-import sys
-import asyncio
-from mcp.server.fastmcp import FastMCP
-from google.cloud import bigquery
-from dotenv import load_dotenv
-
-load_dotenv(override=True)
-project_id = os.environ.get("GOOGLE_CLOUD_PROJECT_ID")
-bq_client = bigquery.Client(project=project_id)
-
-# Initialize FastMCP instead of standard Server
-server = FastMCP("bq-tool-server")
-
-@server.tool()
-async def check_robot_sensors(robot_id: str) -> str:
-    """
-    Fetches real-time sensor status for a robot from BigQuery. Use for safety assessments.
-    Args:
-        robot_id: The unique ID of the robot (e.g., BOT-99, JETSON-ORIN-01)
-    """
-    query = """
-        SELECT zone, lidar_status, bumper_status, vision_3d_status, battery_level, timestamp
-        FROM `warehouse_ops.robot_telemetry`
-        WHERE robot_id = @robot_id
-        ORDER BY timestamp DESC
-        LIMIT 1
-    """
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("robot_id", "STRING", robot_id)]
-    )
-    try:
-        loop = asyncio.get_running_loop()
-        query_job = await loop.run_in_executor(None, lambda: bq_client.query(query, job_config=job_config))
-        results = await loop.run_in_executor(None, lambda: list(query_job.result()))
-        
-        if not results:
-            return f"No telemetry found for {robot_id}."
-            
-        row = results[0]
-        status_report = (
-            f"Robot: {robot_id}\n"
-            f"Zone: {row.zone}\n"
-            f"Sensors: LiDAR={row.lidar_status}, Bumpers={row.bumper_status}, Vision={row.vision_3d_status}\n"
-            f"Battery: {row.battery_level}%\n"
-            f"Last Reported: {row.timestamp}"
-        )
-        return status_report
-    except Exception as e:
-        return f"Error querying BigQuery: {str(e)}"
-
-@server.tool()
-async def analyze_robot_metric_trend(robot_id: str, metric: str, hours: int = 24) -> str:
-    """
-    Analyzes the historical trend of a specific metric for a robot over a time period.
-    Use this for requests about 'history', 'trends', 'logs', or 'anomalies'.
-    Args:
-        robot_id: The unique ID of the robot.
-        metric: The metric to analyze (e.g., 'battery_level', 'lidar_status').
-        hours: The number of hours to look back for the trend analysis (default: 24).
-    """
-    valid_metrics = ['battery_level', 'lidar_status', 'bumper_status', 'vision_3d_status']
-    if metric not in valid_metrics:
-        return f"Invalid metric '{metric}'. Valid metrics are: {', '.join(valid_metrics)}"
-
-    is_numeric_metric = metric == 'battery_level'
-
-    if is_numeric_metric:
-        query = f"""
-            SELECT AVG({metric}) as avg_value, MIN({metric}) as min_value, MAX({metric}) as max_value, COUNT(*) as data_points
-            FROM `warehouse_ops.robot_telemetry`
-            WHERE robot_id = @robot_id AND timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)
-        """
-    else: # Categorical metric
-        query = f"""
-            SELECT {metric} as status, COUNT(*) as count
-            FROM `warehouse_ops.robot_telemetry`
-            WHERE robot_id = @robot_id AND timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)
-            GROUP BY {metric}
-            ORDER BY count DESC
-        """
-
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("robot_id", "STRING", robot_id),
-            bigquery.ScalarQueryParameter("hours", "INT64", hours),
-        ]
-    )
-    try:
-        loop = asyncio.get_running_loop()
-        query_job = await loop.run_in_executor(None, lambda: bq_client.query(query, job_config=job_config))
-        results = await loop.run_in_executor(None, lambda: list(query_job.result()))
-
-        if not results or (is_numeric_metric and results[0].data_points == 0):
-             return f"No telemetry data found for robot {robot_id} for metric '{metric}' in the last {hours} hours."
-
-        report = f"Trend analysis for Robot '{robot_id}' metric '{metric}' over the last {hours} hours:\n"
-        
-        if is_numeric_metric:
-            row = results[0]
-            report += (
-                f"  - Average: {row.avg_value:.2f}\n"
-                f"  - Minimum: {row.min_value}\n"
-                f"  - Maximum: {row.max_value}\n"
-                f"  - Data Points: {row.data_points}"
+# Inside build_tool_wrappers()
+InputModel = create_model(
+    f"{t_name}_input",
+    __base__=BaseModel,
+    **{
+        prop_name: (
+            str if prop_info.get("type") == "string" else
+            int if prop_info.get("type") == "integer" else
+            float if prop_info.get("type") == "number" else
+            bool if prop_info.get("type") == "boolean" else dict,
+            Field(
+                default=... if prop_name in t_schema.get("required", []) else prop_info.get("default", None),
+                description=prop_info.get("description", "")
             )
-        else:
-            for row in results:
-                report += f"  - Status '{row.status}': {row.count} occurrences\n"
-
-        return report.strip()
-    except Exception as e:
-        return f"Error querying BigQuery for trends: {str(e)}"
-        
-if __name__ == "__main__":
-    server.run()
+        )
+        for prop_name, prop_info in t_schema.get("properties", {}).items()
+    }
+)
 ```
+* **Why this is critical:** Standard MCP servers declare dynamic JSON schemas. By feeding these into Pydantic at boot, we force Gemini to strictly respect variable constraints (like casting the lookback period `hours` strictly to a Python `int`). If Gemini tries to call a tool incorrectly, the A2A gateway intercepts and corrects it before it crashes the BigQuery driver.
 
-### 2. The Autonomous Agent Service (`agent-service/main.py`)
-
-This script is the "brain." It sets up a web server to host the Gemini-powered agent and orchestrates the connection to the Tool Server.
-
-*   `build_tool_wrappers`: This function is the "smart connector." It connects to the MCP server, gets a list of available tools, and for each one, uses `pydantic.create_model` to build a strict, type-safe function signature. This is the key to preventing AI confusion and ensuring the AI provides all required arguments. The `create_wrapper` factory inside is a Python best-practice to prevent variable scope issues inside loops.
-*   `expert = Agent(...)`: This defines the AI's core identity. The `instruction` prompt is crucial—it turns the agent into a "Warehouse Safety Investigator" and gives it a multi-step protocol for autonomously using its tools to find the root cause of problems.
-*   `combined_lifespan`: This FastAPI feature is used to manage background tasks. Here, it starts the `bq-mcp-server` as a persistent background process *once* when the web server boots up. This is a massive performance optimization, ensuring tool calls are lightning-fast.
+### 2. Persistent Stream Multiplexing (The Lifespan)
+Older systems spawned a new sub-process on every single tool execution. V3 mounts a persistent stdio session within FastAPI's lifespan configuration.
 
 ```python
-# ~/Projects/adk-basic/v3-dockerized/agent-service/main.py
-import os
-import sys
-import asyncio
-import google.auth
-from dotenv import load_dotenv
-from fastapi import FastAPI
-from pydantic import BaseModel, Field, create_model
-from google.adk import Agent
-from google.adk.models import google_llm
-from google.adk.a2a.utils.agent_to_a2a import to_a2a 
-from google.genai import client
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-from contextlib import asynccontextmanager
-import inspect 
-
-os.environ["GOOGLE_API_USE_CLIENT_CERTIFICATE"] = "false"
-load_dotenv(override=True)
-
-project_id = os.environ.get("GOOGLE_CLOUD_PROJECT_ID")
-google_cloud_location = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
-
-TOOL_SERVER_PATH = os.environ.get(
-    "TOOL_SERVER_PATH", 
-    os.path.expanduser("~/Projects/adk-basic/v2-bq-mcp-tool-server/bq-mcp-server/main.py")
-)
-
-async def build_tool_wrappers(session: ClientSession):
-    mcp_tools = await session.list_tools()
-    adk_tools = []
-    for tool in mcp_tools.tools:
-        t_name = tool.name
-        t_desc = tool.description
-        t_schema = tool.inputSchema
-
-        InputModel = create_model(
-            f"{t_name}_input",
-            __base__=BaseModel,
-            **{
-                prop_name: (
-                    str if prop_info.get("type") == "string" else
-                    int if prop_info.get("type") == "integer" else
-                    float if prop_info.get("type") == "number" else
-                    bool if prop_info.get("type") == "boolean" else dict,
-                    Field(
-                        default=... if prop_name in t_schema.get("required", []) else prop_info.get("default", None),
-                        description=prop_info.get("description", "")
-                    )
-                )
-                for prop_name, prop_info in t_schema.get("properties", {}).items()
-            }
-        )
-
-        def create_wrapper(tool_name):
-            async def mcp_tool_wrapper(params: InputModel):
-                arguments = params.model_dump()
-                try: 
-                    response = await session.call_tool(tool_name, arguments=arguments)
-                    return "\n".join([c.text for c in response.content if hasattr(c, 'text')])
-                except Exception as e:
-                    print(f"CRITICAL: Tool call to '{tool_name}' failed, session might be dead: {e}")
-                    return "ERROR: The telemetry system is temporarily offline. Please retry in 10 seconds."
-            return mcp_tool_wrapper
-
-        wrapper = create_wrapper(t_name)
-        wrapper.__name__ = t_name
-        wrapper.__doc__ = t_desc
-        adk_tools.append(wrapper)
-        
-    return adk_tools
-
-credentials, _ = google.auth.default(
-    scopes=["https://www.googleapis.com/auth/cloud-platform"], 
-    quota_project_id=project_id
-)
-vertex_client = client.Client(
-    vertexai=True, project=project_id, location=google_cloud_location, credentials=credentials
-)
-gemini_model = google_llm.Gemini(model="gemini-1.5-flash-001")
-gemini_model.api_client = vertex_client
-
-expert = Agent(
-    name="mcp_warehouse_expert", 
-    description="Advanced warehouse safety agent. Uses MCP to dynamically query BigQuery telemetry and evaluate robot hardware/environmental risks.",
-    model=gemini_model,  
-    tools=[], 
-    instruction="""
-    You are a Warehouse Safety Investigator. Your goal is to find the ROOT CAUSE of issues.
-
-    1. START: Always run 'check_robot_sensors' first to see the current state.
-    2. ANALYZE: If current sensors are 'DEGRADED' or battery is < 20%, you MUST investigate further.
-    3. INVESTIGATE: Automatically call 'analyze_robot_metric_trend' for the suspicious metric. 
-       - Start with hours=24.
-       - If 24 hours returns no data, try hours=168 (1 week).
-    4. SYNTHESIZE: Once you have both the current state and the trend, provide your Safety Assessment.
-    5. DO NOT ask the user for permission to run follow-up tools; just execute them and provide the finished insight.
-
-    TOOL USAGE RULES - YOU MUST FOLLOW THESE:
-    1. For immediate safety assessments, current status, or a "health check", you MUST use the `check_robot_sensors` tool.
-    2. For requests about "trends", "anomalies", "history", "logs", or behavior "over time", you MUST use the `analyze_robot_metric_trend` tool.
-
-    FORMATTING RULES:
-    A. IF you are performing a brand new Safety Assessment, you MUST output your final response using beautifully structured Markdown.
-    B. IF the user is asking a follow-up question, answer naturally in plain text paragraphs.
-    """
-)
-
 @asynccontextmanager
 async def combined_lifespan(app: FastAPI):
-    python_cmd = os.environ.get("PYTHON_PATH", "python")
-    server_params = StdioServerParameters(
-        command=python_cmd, 
-        args=[TOOL_SERVER_PATH],
-        env=os.environ.copy(),
-        stderr=sys.stderr
-    )
-    
-    print("Starting persistent Tool Server subprocess...")
+    # Spawns background process ONCE on FastAPI bootup
     async with stdio_client(server_params) as (read_stream, write_stream):
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()
-            print("Building ADK tool wrappers...")
             expert.tools = await build_tool_wrappers(session)
-            print(f"Successfully bound {len(expert.tools)} tools.")
-            yield
-    print("Shutting down agent service and killing Tool Server subprocess...")
-
-app = to_a2a(
-    expert, 
-    lifespan=combined_lifespan,
-)
+            yield # Keep connection open while server runs
 ```
+* **Why this is critical:** Spawning a Python subprocess, authenticating with Google Cloud Application Default Credentials (ADC), and initializing the BigQuery driver on every turn takes 3–5 seconds. This lifecycle keeps the subprocess open in the background. Subsequent tool calls execute in milliseconds using standard JSON-RPC stream multiplexing.
+
+### 3. Factory Closure Scoping (The Executor)
+When dynamically generating async functions inside loops, standard Python closures can leak variable scopes. V3 uses a factory function to ensure clean tool isolation.
+
+```python
+def create_wrapper(tool_name):
+    async def mcp_tool_wrapper(params: InputModel):
+        arguments = params.model_dump()
+        try: 
+            response = await session.call_tool(tool_name, arguments=arguments)
+            return "\n".join([c.text for c in response.content if hasattr(c, 'text')])
+        except Exception as e:
+            print(f"CRITICAL: Tool call to '{tool_name}' failed: {e}")
+            return "ERROR: The telemetry system is temporarily offline."
+    return mcp_tool_wrapper
+```
+* **Why this is critical:** Without the `create_wrapper` factory function, Python's lazy evaluation would cause every discovered tool wrapper to invoke whichever `t_name` was evaluated *last* in the dynamic registration loop. This factory explicitly locks the `tool_name` namespace per generated tool.
 
 ---
 
@@ -597,3 +384,5 @@ Use these natural language queries in Gemini Enterprise to test the agent's auto
 | **Environmental Stress** | Have Gemini correlate BOT-21's accelerated battery drain to the "Cold Storage" environment. | "Why is BOT-21's battery dying so much faster than the others?" <br/> "Compare the battery performance of BOT-21 in Cold Storage to BOT-42 at the Loading Dock." |
 | **Healthy Operations** | Ensure the agent doesn't hallucinate issues for a perfectly healthy robot (BOT-42). | "Give me a routine health check on BOT-42." <br/> "Pull the latest telemetry for BOT-42. Are there any anomalies at all?" |
 | **Catastrophic Crash** | Trigger the severe CRAWL logic and immediate shutdown requirement for BOT-07. | "EMERGENCY: Pull data for BOT-07 immediately. Did it crash?" <br/> "We just lost LiDAR connection to BOT-07. Run an urgent safety assessment." |
+
+---
