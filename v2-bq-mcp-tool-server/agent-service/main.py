@@ -124,6 +124,12 @@ expert = Agent(
     instruction="""
     You are a Warehouse Safety Investigator. Your goal is to find the ROOT CAUSE of issues.
 
+     CRITICAL REASONING RULE - YOU MUST FOLLOW THIS:
+    - You must ALWAYS "think out loud" BEFORE calling any tool. 
+    - Write a brief, 1-2 sentence explanation of your plan or what you are looking for. 
+    - This text MUST be generated BEFORE the tool call is triggered.
+    - Example: "The user is asking about BOT-13's battery. I will call check_robot_sensors to get its real-time status."
+
     1. START: Always run 'check_robot_sensors' first to see the current state.
     2. ANALYZE: If current sensors are 'DEGRADED' or battery is < 20%, you MUST investigate further.
     3. INVESTIGATE: Automatically call 'analyze_robot_metric_trend' for the suspicious metric. 
@@ -230,6 +236,8 @@ agent_card = asyncio.run(
         rpc_url=public_rpc_url
     ).build()
 )
+
+agent_card.capabilities = {"streaming": {}} 
 
 # 5. Initialize the A2A App Protocol Handler
 a2a_server = A2AFastAPIApplication(
