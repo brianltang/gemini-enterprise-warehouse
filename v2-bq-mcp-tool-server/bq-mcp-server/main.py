@@ -17,6 +17,47 @@ server = FastMCP("bq-tool-server")
 # 1. DEFINE THE MCP TOOL (Standard Pythonic Registration)
 # =====================================================================
 @server.tool()
+async def list_available_robots() -> str:
+    """
+    Lists all unique robot IDs and their primary operating zones currently present 
+    in the warehouse database. Use this tool when the user asks "what bots are available",
+    "list the robots", or is unsure which robot ID to check.
+    """
+    # This query extracts the most recent zone for each unique robot_id in the system
+    query = """
+        WITH RankedTelemetry AS (
+            SELECT 
+                robot_id, 
+                zone,
+                ROW_NUMBER() OVER (PARTITION BY robot_id ORDER BY timestamp DESC) as rn
+            FROM `warehouse_ops.robot_telemetry`
+        )
+        SELECT robot_id, zone
+        FROM RankedTelemetry
+        WHERE rn = 1
+        ORDER BY robot_id ASC
+    """
+    
+    try:
+        loop = asyncio.get_running_loop()
+        query_job = await loop.run_in_executor(
+            None, 
+            lambda: bq_client.query(query)
+        )
+        results = await loop.run_in_executor(None, lambda: list(query_job.result()))
+        
+        if not results:
+            return "No active robots found in the database telemetry."
+            
+        report = "Available Robots in the Warehouse:\n"
+        for row in results:
+            report += f"  - {row.robot_id} (Operating Zone: {row.zone})\n"
+            
+        return report.strip()
+    except Exception as e:
+        return f"Error querying available robots from BigQuery: {str(e)}"
+
+@server.tool()
 async def check_robot_sensors(robot_id: str) -> str:
     """
     Fetches real-time sensor status for a robot from BigQuery. Use for safety assessments.
