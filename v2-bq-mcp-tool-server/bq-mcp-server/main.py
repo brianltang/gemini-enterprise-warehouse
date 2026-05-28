@@ -58,6 +58,44 @@ async def list_available_robots() -> str:
         return f"Error querying available robots from BigQuery: {str(e)}"
 
 @server.tool()
+async def get_robots_in_zone(zone_name: str) -> str:
+    """
+    Finds all robots currently operating in or near a specific zone.
+    Args:
+        zone_name: The name of the zone (e.g., 'North Aisle', 'Loading Dock').
+    """
+    query = """
+        WITH LatestTelemetry AS (
+            SELECT robot_id, zone, battery_level, ROW_NUMBER() OVER (PARTITION BY robot_id ORDER BY timestamp DESC) as rn
+            FROM `warehouse_ops.robot_telemetry`
+        )
+        SELECT robot_id, battery_level, zone
+        FROM LatestTelemetry
+        WHERE rn = 1 AND LOWER(zone) LIKE LOWER(CONCAT('%', @zone_name, '%'))
+    """
+    
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("zone_name", "STRING", zone_name)]
+    )
+
+    try:
+        loop = asyncio.get_running_loop()
+        query_job = await loop.run_in_executor(None, lambda: bq_client.query(query, job_config=job_config))
+        results = await loop.run_in_executor(None, lambda: list(query_job.result()))
+        
+        if not results:
+            return f"No robots are currently reporting from the '{zone_name}' zone."
+            
+        report = f"Robots in {zone_name}:\n"
+        for row in results:
+            report += f"  - {row.robot_id} (Battery: {row.battery_level}%, Exact Zone: {row.zone})\n"
+        return report.strip()
+
+    except Exception as e:
+        return f"Error querying zone: {str(e)}"
+
+
+@server.tool()
 async def check_robot_sensors(robot_id: str) -> str:
     """
     Fetches real-time sensor status for a robot from BigQuery. Use for safety assessments.
